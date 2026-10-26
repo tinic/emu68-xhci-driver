@@ -8,12 +8,12 @@ Standalone source-extraction model. Not a full driver build or hardware proof.
 from pathlib import Path
 import ast
 import os
-import shutil
 import subprocess
 import tempfile
 
 X = Path(__file__).resolve().parents[2]
-B = Path(tempfile.mkdtemp(prefix='xhci-host-'))
+workspace = tempfile.TemporaryDirectory(prefix='xhci-host-')
+B = Path(workspace.name)
 CC = os.environ.get('CC', 'cc')
 
 
@@ -125,8 +125,8 @@ for name, defines, expected in matrix:
         exe = B / label
         c.write_text(source)
         command = [CC, '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-DEXPECTED=' + str(expected), *defines, str(c), '-o', str(exe)]
-        subprocess.run(command, check=True)
-        result = subprocess.run([str(exe)], text=True, capture_output=True)
+        subprocess.run(command, check=True, timeout=60)
+        result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)
         assert result.returncode == int(negative), (label, result.stdout, result.stderr)
         if negative:
             assert 'FAIL legacy stale CPU cycle invalidated' in result.stdout, result.stdout
@@ -135,5 +135,5 @@ for name, defines, expected in matrix:
         results[label] = {'defines': defines, 'returncode': result.returncode, 'output': result.stdout}
         print(label, result.stdout.strip(), flush=True)
 
-shutil.rmtree(B)
+workspace.cleanup()
 print('PASS', 'test_config_recovery.py')

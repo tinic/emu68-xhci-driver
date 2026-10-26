@@ -8,7 +8,8 @@ This checks control flow under the stated model, not hardware memory ordering.
 from pathlib import Path
 import os,subprocess,sys,tempfile
 X=Path(__file__).resolve().parents[2]
-B=Path(tempfile.mkdtemp(prefix='xhci-host-'))
+workspace = tempfile.TemporaryDirectory(prefix='xhci-host-')
+B = Path(workspace.name)
 CC=os.environ.get('CC','cc')
 CFLAGS=['-std=c11','-Wall','-Wextra','-Werror','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all']
 def read(path):return (X/'xhci.device/src/xhci'/path).read_text()
@@ -102,8 +103,8 @@ for name in ['fixed','publish-before-flush-negative','no-empty-recheck-negative'
  if name=='no-empty-recheck-negative':f[4]=f[4].replace('            continue;','            break;')
  if name=='retired-alias-negative':f[4]=f[4].replace('union xhci_trb event = *trb;','union xhci_trb *event = trb;').replace('handle_event(ctrl, &event);','handle_event(ctrl, event);')
  text=prefix+''.join(f)+suffix;c=B/(name+'.c');exe=B/name;c.write_text(text)
- subprocess.run([CC]+CFLAGS+[str(c),'-o',str(exe)],check=True)
- q=subprocess.run([str(exe)],capture_output=True,text=True)
+ subprocess.run([CC]+CFLAGS+[str(c),'-o',str(exe)],check=True, timeout=60)
+ q=subprocess.run([str(exe)],capture_output=True,text=True, timeout=10)
  assert q.returncode==(0 if name=='fixed' else 1),(name,q.stdout,q.stderr)
  assert 'coalesce-order checks=10 failures=' in q.stdout,(name,q.stdout)
  target={'publish-before-flush-negative':'first cycle stays invalid','no-empty-recheck-negative':'empty recheck finds event hidden','retired-alias-negative':'copied event survives'}

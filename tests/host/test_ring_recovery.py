@@ -7,7 +7,8 @@ Host control-flow regression only; not a hardware DMA or USB stress test.
 from pathlib import Path
 import os,subprocess,sys,tempfile
 X=Path(__file__).resolve().parents[2]
-B=Path(tempfile.mkdtemp(prefix='xhci-host-'))
+workspace = tempfile.TemporaryDirectory(prefix='xhci-host-')
+B = Path(workspace.name)
 CC=os.environ.get('CC','cc')
 CFLAGS=['-std=c11','-Wall','-Wextra','-Werror','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all']
 def read(p):return (X/'xhci.device/src/xhci'/p).read_text()
@@ -94,8 +95,8 @@ for variant in ['fixed','missing-recovery-push-negative','missing-link-unchain-n
  if variant=='missing-link-unchain-negative':f[6]=f[6].replace('link->link.control &= le32(~TRB_CHAIN);','link->link.control |= le32(0);')
  if variant=='missing-event-cycle-toggle-negative':f[3]=f[3].replace('ring->cycle_state = (ring->cycle_state ? 0 : 1);','ring->cycle_state = ring->cycle_state;')
  source=prefix+''.join(f)+suffix;p=B/(variant+'.c');exe=B/variant;p.write_text(source)
- subprocess.run([CC]+CFLAGS+[str(p),'-o',str(exe)],check=True)
- r=subprocess.run([str(exe)],text=True,capture_output=True)
+ subprocess.run([CC]+CFLAGS+[str(p),'-o',str(exe)],check=True, timeout=60)
+ r=subprocess.run([str(exe)],text=True,capture_output=True, timeout=10)
  assert r.returncode==(0 if variant=='fixed' else 1),(variant,r.stdout,r.stderr)
  target={'missing-recovery-push-negative':'FAIL dequeue lookup preserves pending dirty cycle/data','missing-link-unchain-negative':'FAIL intervening Link loses chain','missing-event-cycle-toggle-negative':'FAIL final segment wrap toggles cycle'}
  if variant in target:assert target[variant] in r.stdout,(variant,r.stdout)

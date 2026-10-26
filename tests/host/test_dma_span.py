@@ -5,7 +5,8 @@
 from pathlib import Path
 import os,subprocess,sys,tempfile
 X=Path(__file__).resolve().parents[2]
-B=Path(tempfile.mkdtemp(prefix='xhci-host-'))
+workspace = tempfile.TemporaryDirectory(prefix='xhci-host-')
+B = Path(workspace.name)
 CC=os.environ.get('CC','cc')
 CFLAGS=['-std=c11','-Wall','-Wextra','-Werror','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all']
 def src(path):return (X/'xhci.device'/path).read_text()
@@ -116,8 +117,8 @@ for variant in ['fixed','missing-out-bounce-copy-negative','missing-in-post-inva
  if variant=='missing-link-copy-negative':f[6]=f[6].replace('copy_piece_home(ctrl, span, span->link.slot, span->link.offset, span->link.length, delivered);','(void)span;')
  tail=suffix.replace("int main(void){", "int main(void){ (void)fake_post;")
  text=prefix+types+helpers+''.join(f)+tail;p=B/(variant+'.c');exe=B/variant;p.write_text(text)
- subprocess.run([CC]+CFLAGS+[str(p),'-o',str(exe)],check=True)
- r=subprocess.run([str(exe)],text=True,capture_output=True)
+ subprocess.run([CC]+CFLAGS+[str(p),'-o',str(exe)],check=True, timeout=60)
+ r=subprocess.run([str(exe)],text=True,capture_output=True, timeout=10)
  assert r.returncode==(0 if variant=='fixed' else 1),(variant,r.stdout,r.stderr)
  if variant!='fixed':assert 'payload checksum' in r.stdout,(variant,r.stdout)
  results[variant]={'returncode':r.returncode,'output':r.stdout};print(variant,r.stdout,flush=True)

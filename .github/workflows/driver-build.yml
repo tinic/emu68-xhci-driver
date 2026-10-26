@@ -13,6 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: ghcr.io/rondoval/amiga-build-container:gcc-v16.2
+    env:
+      STACK_REV: 0fef34d7c7f4723238df94e31e6bfaa171219352
+      COMMON_REV: 819ed0a1d88fd80501ae789967c2c42464a6fc83
+      BASE_REV: 4aa7e4c4430f259e2d1675dd249c069a47177e91
     strategy:
       fail-fast: false
       matrix:
@@ -31,11 +35,13 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory '*'
           git clone -q --depth 1 https://github.com/rondoval/emu68-driver-stack.git stack
+          git -C stack fetch -q --depth 1 origin "$STACK_REV"
+          git -C stack checkout -q --detach FETCH_HEAD
           git -C stack submodule update -q --init --depth 1
           # high-speed-isoch needs Emu68Common 2.1 (DT_OpenSymbol): the dev branch
-          git -C stack/components/emu68-common fetch -q --depth 1 origin dev
+          git -C stack/components/emu68-common fetch -q --depth 1 origin "$COMMON_REV"
           git -C stack/components/emu68-common checkout -q FETCH_HEAD
-          git -C xhci worktree add -q ../base origin/high-speed-isoch
+          git -C xhci worktree add -q ../base "$BASE_REV"
           {
             echo "head=$(git -C xhci rev-parse HEAD)"
             echo "base=$(git -C base rev-parse HEAD)"
@@ -57,7 +63,21 @@ jobs:
               echo "Build command failed; see $log" >&2
               return 1
             fi
-            if grep -E "warning:|error:" "$log"; then
+            local diagnostics status=0
+            diagnostics=$(grep -E "warning:|error:" "$log") || status=$?
+            [ "$status" -le 1 ] || return 1
+            if [ "$status" -eq 0 ]; then
+              # Unresolved upstream emu68-common diagnostic at COMMON_REV.
+              # Keep it visible, accept one exact occurrence in this
+              # dependency build only, and reject any additional diagnostic.
+              # Compiler flags and Werror are unchanged.
+              local known="$PWD/stack/components/emu68-common/include/emu68_features.h:49:14: warning: declaration of 'DeviceTreeBase' shadows a global declaration [-Wshadow]"
+              if { [ "$log" = build-head.log ] || [ "$log" = build-base.log ]; } &&
+                 [ "$diagnostics" = "$known" ]; then
+                echo "KNOWN UNRESOLVED DEPENDENCY WARNING: $diagnostics"
+                return 0
+              fi
+              printf '%s\n' "$diagnostics"
               echo "Build diagnostics rejected; see $log" >&2
               return 1
             fi

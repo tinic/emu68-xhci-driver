@@ -1,0 +1,18 @@
+name: host-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-models:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache-op host models (${{ matrix.cc }})
+        env:
+          CC: ${{ matrix.cc }}
+        run: tests/host/run_all.sh

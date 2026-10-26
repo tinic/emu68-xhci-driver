@@ -36,17 +36,39 @@ jobs:
           git -C stack/components/emu68-common fetch -q --depth 1 origin dev
           git -C stack/components/emu68-common checkout -q FETCH_HEAD
           git -C xhci worktree add -q ../base origin/high-speed-isoch
+          {
+            echo "head=$(git -C xhci rev-parse HEAD)"
+            echo "base=$(git -C base rev-parse HEAD)"
+            echo "stack=$(git -C stack rev-parse HEAD)"
+            echo "common=$(git -C stack/components/emu68-common rev-parse HEAD)"
+            git -C stack submodule status --recursive
+            cmake --version
+          } > build-provenance.log
       - name: Build head and base
         shell: bash
         run: |
           set -euo pipefail
+          checked_build() { # logfile command args...
+            local log="$1"
+            shift
+            if "$@" 2>&1 | tee "$log"; then
+              :
+            else
+              echo "Build command failed; see $log" >&2
+              return 1
+            fi
+            if grep -E "warning:|error:" "$log"; then
+              echo "Build diagnostics rejected; see $log" >&2
+              return 1
+            fi
+          }
           build() { # src tag lvo extra
             local i="$PWD/i-$2"
             cmake -S stack -B "b-$2" -DEMU68_DEBUG_BACKEND=off -DEMU68_FORCE_LVO_CACHE_OPS="$3" \
               -DEMU68_XHCI_CONTEXT_SOURCE_DIR="$PWD/$1" -DCMAKE_INSTALL_PREFIX="$i" \
               "-DTOOLCHAIN_CFLAGS=-I$i/Developer/include $4" > "cfg-$2.log"
-            cmake --build "b-$2" --target devicetree.resource > /dev/null
-            cmake --build "b-$2" --target emu68-xhci-driver-context 2>&1 | tee "build-$2.log" | grep -E "warning:|error:" || true
+            checked_build "devicetree-$2.log" cmake --build "b-$2" --target devicetree.resource
+            checked_build "build-$2.log" cmake --build "b-$2" --target emu68-xhci-driver-context
             cp "$i/DEVS/USBHardware/xhci.device" "xhci-$2.device"
             sha256sum "xhci-$2.device"
           }
@@ -64,3 +86,14 @@ jobs:
             ! cmp -s xhci-head.device xhci-base.device
             [ "$clear_e" -gt 0 ]
           fi
+      - name: Retain build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-build-${{ matrix.name }}
+          path: |
+            build-provenance.log
+            cfg-*.log
+            devicetree-*.log
+            build-*.log
+            xhci-*.device

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS = ['test_coalesce_order.py', 'test_ring_recovery.py',
@@ -88,14 +89,45 @@ with tempfile.TemporaryDirectory(prefix='xhci-lifecycle-') as outer:
     assert not list(model_tmp.iterdir()), 'timed-out producer temporary directory leaked'
     print('PASS infinite-producer timeout and cleanup')
 
-    # Both generations inherit the output pipe. communicate() can finish
-    # after the deadline only when the sleeping grandchild is stopped too.
-    sleeper = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"
+    # A second communicate() timeout used to be mistaken for success here.
+    # Keep a PID witness, check the original deadline, and verify that the
+    # grandchild stopped. A zombie is stopped, even before init reaps it.
+    witness = outer / 'sleeper-pids'
+    sleeper = (
+        "import os,pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())+' '+str(child.pid)); "
+        "time.sleep(60)"
+    )
+    deadline = 2
     try:
-        run_model([sys.executable, '-c', sleeper], env=env, timeout=0.5)
-    except subprocess.TimeoutExpired:
-        print('PASS outer timeout stops model process group')
-    else:
-        raise AssertionError('outer timeout did not fire')
+        try:
+            run_model([sys.executable, '-c', sleeper, str(witness)],
+                      env=env, timeout=deadline)
+        except subprocess.TimeoutExpired as error:
+            assert error.timeout == deadline, ('cleanup timed out', error)
+        else:
+            raise AssertionError('outer timeout did not fire')
+        assert witness.exists(), 'sleeper never started its grandchild'
+        group, grandchild = map(int, witness.read_text().split())
+        for attempt in range(20):
+            state = subprocess.run(['ps', '-o', 'stat=', '-p', str(grandchild)],
+                                   capture_output=True, text=True, timeout=2)
+            assert state.returncode in (0, 1), state
+            if not state.stdout.strip() or state.stdout.lstrip().startswith('Z'):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(('grandchild survived outer timeout', grandchild,
+                                  state.stdout))
+        print('PASS outer timeout stops witnessed model process group')
+    finally:
+        # A negative control must not leak the very process it detects.
+        if witness.exists():
+            group, grandchild = map(int, witness.read_text().split())
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 print('PASS test_harness_lifecycle.py')

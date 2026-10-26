@@ -4,6 +4,6 @@
 # fixed and with one mutation each (a mutation must fail).  CC defaults to cc.
 set -e
 cd "$(dirname "$0")"
-for t in test_coalesce_order.py test_ring_recovery.py test_dma_span.py test_config_recovery.py test_harness_lifecycle.py; do
+for t in test_coalesce_order.py test_ring_recovery.py test_dma_span.py test_config_recovery.py test_harness_lifecycle.py test_cache_policy.py; do
 	python3 -I "$t"
 done

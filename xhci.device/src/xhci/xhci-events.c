@@ -123,56 +123,107 @@ static void debug_port_status_event(struct xhci_ctrl *ctrl, union xhci_trb *even
 #define debug_port_status_event(ctrl, event) ((void)0)
 #endif
 
+/* One event TRB: dispatch by type. */
+static void handle_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
+{
+    trb_type type = TRB_FIELD_TO_TYPE(le32(event->event_cmd.flags));
+
+    switch (type)
+    {
+    case TRB_TRANSFER:
+    {
+        const u32 flags = le32(event->trans_event.flags);
+        const u32 slot = TRB_TO_SLOT_ID(flags);
+        KprintfT("Transfer Event TRB detected: slot %lu ep %lu (%08lx %08lx %08lx %08lx)\n",
+                 (ULONG)slot,
+                 (ULONG)TRB_TO_EP_INDEX(flags),
+                 (ULONG)le32(event->generic.field[0]),
+                 (ULONG)le32(event->generic.field[1]),
+                 (ULONG)le32(event->generic.field[2]),
+                 (ULONG)le32(event->generic.field[3]));
+
+        struct usb_device *udev = ctrl->devices_by_slot_id[slot];
+        if (!udev)
+        {
+            Kprintf("No usb_device for slot %lu\n", (ULONG)slot);
+            break;
+        }
+        dispatch_ep_event(udev, event);
+    }
+    break;
+
+    case TRB_COMPLETION:
+        xhci_dispatch_command_event(ctrl, event);
+        break;
+
+    case TRB_PORT_STATUS:
+        debug_port_status_event(ctrl, event);
+        xhci_roothub_complete_int_request(ctrl->root_hub);
+        break;
+    default:
+        Kprintf("Unexpected XHCI event type %lu, skipping... (%08lx %08lx %08lx %08lx)\n",
+                (ULONG)type,
+                (ULONG)le32(event->generic.field[0]),
+                (ULONG)le32(event->generic.field[1]),
+                (ULONG)le32(event->generic.field[2]),
+                (ULONG)le32(event->generic.field[3]));
+        break;
+    }
+}
+
+#if XHCI_COALESCE_CACHE_OPS
+/*
+ * The drain with coalesced cache maintenance (xhci_cache_whole()).  One
+ * whole-cache flush up front stands for the per-event invalidates: each
+ * event the controller wrote before it signalled is read from RAM after the
+ * flush (xhci_ring_get_event_trb_cached() has why a stale line can hide an
+ * event but never fake one).  Each event is copied out and retired before
+ * its handler runs, so the slot is free once ERDP moves past it; ERDP is
+ * written by the next xhci_cache_sync_all(), the handler's own (a giveback)
+ * or the one below, and that call's flush is the invalidate for the re-check
+ * that follows.  The drain ends only on an empty read with every retired
+ * event acknowledged, i.e. on a read made after an ERDP write and a flush.
+ */
+static BOOL process_events_coalesced(struct xhci_ctrl *ctrl)
+{
+    BOOL activity = FALSE;
+
+    xhci_cache_flush_all(ctrl->sysBase);
+    for (;;)
+    {
+        union xhci_trb *trb = xhci_ring_get_event_trb_cached(ctrl->event_ring);
+        if (!trb)
+        {
+            if (!ctrl->evt_unacked)
+                break;
+            xhci_cache_sync_all(ctrl); /* ERDP, then the re-check's invalidate */
+            continue;
+        }
+
+        union xhci_trb event = *trb;
+        xhci_ring_consume_event(ctrl);
+        ctrl->evt_unacked = TRUE;
+        activity = TRUE;
+        handle_event(ctrl, &event);
+    }
+
+    return activity;
+}
+#endif
+
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 {
+#if XHCI_COALESCE_CACHE_OPS
+    if (xhci_cache_whole(ctrl))
+        return process_events_coalesced(ctrl);
+#endif
+
     BOOL activity = FALSE;
     union xhci_trb *event;
     while ((event = xhci_ring_get_event_trb(ctrl->event_ring)))
     {
         activity = TRUE;
-        trb_type type = TRB_FIELD_TO_TYPE(le32(event->event_cmd.flags));
-
-        switch (type)
-        {
-        case TRB_TRANSFER:
-        {
-            const u32 flags = le32(event->trans_event.flags);
-            const u32 slot = TRB_TO_SLOT_ID(flags);
-            KprintfT("Transfer Event TRB detected: slot %lu ep %lu (%08lx %08lx %08lx %08lx)\n",
-                     (ULONG)slot,
-                     (ULONG)TRB_TO_EP_INDEX(flags),
-                     (ULONG)le32(event->generic.field[0]),
-                     (ULONG)le32(event->generic.field[1]),
-                     (ULONG)le32(event->generic.field[2]),
-                     (ULONG)le32(event->generic.field[3]));
-
-            struct usb_device *udev = ctrl->devices_by_slot_id[slot];
-            if (!udev)
-            {
-                Kprintf("No usb_device for slot %lu\n", (ULONG)slot);
-                break;
-            }
-            dispatch_ep_event(udev, event);
-        }
-        break;
-
-        case TRB_COMPLETION:
-            xhci_dispatch_command_event(ctrl, event);
-            break;
-
-        case TRB_PORT_STATUS:
-            debug_port_status_event(ctrl, event);
-            xhci_roothub_complete_int_request(ctrl->root_hub);
-            break;
-        default:
-            Kprintf("Unexpected XHCI event type %lu, skipping... (%08lx %08lx %08lx %08lx)\n",
-                    (ULONG)type,
-                    (ULONG)le32(event->generic.field[0]),
-                    (ULONG)le32(event->generic.field[1]),
-                    (ULONG)le32(event->generic.field[2]),
-                    (ULONG)le32(event->generic.field[3]));
-            break;
-        }
+        handle_event(ctrl, event);
 
         /* Retire only after the handler finishes reading this TRB. */
         xhci_ring_consume_event(ctrl);

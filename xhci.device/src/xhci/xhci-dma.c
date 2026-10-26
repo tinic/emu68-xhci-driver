@@ -197,6 +197,16 @@ void xhci_dma_span_sync(struct xhci_ctrl *ctrl, const struct xhci_dma_span *span
 	struct ExecBase *SysBase = ctrl->sysBase;
 	const ULONG dir = span->to_device ? DMA_ReadFromRAM : DMA_WriteToRAM;
 
+	/* Coalescing: the TD's giveback flushes the whole cache before the
+	 * controller can see the TD (xhci-submit.c, giveback_first_trb()), which
+	 * covers the clean and the pre-arm invalidate of every case below. */
+	if (xhci_cache_whole(ctrl))
+	{
+		if (span->mapping == XHCI_DMA_BOUNCE && span->to_device)
+			memcpy(span->bounce_buf, span->buffer, span->length);
+		return;
+	}
+
 	switch (span->mapping)
 	{
 	case XHCI_DMA_DIRECT:
@@ -312,9 +322,10 @@ APTR xhci_dma_span_link_piece(struct xhci_ctrl *ctrl, struct xhci_dma_span *span
 	{
 		const UBYTE *src = (span->mapping == XHCI_DMA_BOUNCE) ? span->bounce_buf : span->buffer;
 		memcpy(slot, src + offset, length);
-		cache_pre_dma(slot, length, DMA_ReadFromRAM);
+		if (!xhci_cache_whole(ctrl)) /* else the giveback flush covers it */
+			cache_pre_dma(slot, length, DMA_ReadFromRAM);
 	}
-	else
+	else if (!xhci_cache_whole(ctrl))
 		cache_pre_dma(slot, length, DMA_WriteToRAM);
 	return slot;
 }

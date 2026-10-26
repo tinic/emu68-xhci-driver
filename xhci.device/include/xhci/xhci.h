@@ -35,6 +35,20 @@
 #include <drv_timer.h>
 #include <devices/usbhcd_context.h>
 
+/* XHCI_COALESCE_CACHE_OPS: on the LVO cache-op build, when exec's
+ * CachePreDMA/CachePostDMA are still the Kickstart's (each call flushes the
+ * whole data cache, whatever the range), the transfer and event paths replace
+ * their per-range calls with a few whole-cache flushes at the points where
+ * ordering needs them (xhci_cache_sync_all()).  0 compiles the per-range
+ * behaviour only; the rangeops build always does. */
+#ifndef XHCI_COALESCE_CACHE_OPS
+#ifdef EMU68_FORCE_LVO_CACHE_OPS
+#define XHCI_COALESCE_CACHE_OPS 1
+#else
+#define XHCI_COALESCE_CACHE_OPS 0
+#endif
+#endif
+
 struct usb_device;
 
 struct pci_dev;
@@ -226,7 +240,37 @@ struct xhci_ctrl
 	struct lock_prof lockProf; /* xfer_lock wait/hold (outermost only) */
 	u32 profTicks;             /* tick divider for the report cadence */
 	u32 irq_t0;                /* ISR timestamp feeding XP_IRQ_TO_TASK */
+
+#if XHCI_COALESCE_CACHE_OPS
+	/* Set at probe when exec's CachePreDMA and CachePostDMA are the
+	 * Kickstart's own: coalesce cache maintenance (XHCI_COALESCE_CACHE_OPS). */
+	BOOL cache_whole;
+	/* Event TRBs retired since the last ERDP write; xhci_cache_sync_all()
+	 * writes ERDP before it flushes. */
+	BOOL evt_unacked;
+#endif
 };
+
+/* TRUE when this controller coalesces its cache maintenance. */
+static inline BOOL xhci_cache_whole(const struct xhci_ctrl *ctrl)
+{
+#if XHCI_COALESCE_CACHE_OPS
+	return ctrl->cache_whole;
+#else
+	(void)ctrl;
+	return FALSE;
+#endif
+}
+
+#if XHCI_COALESCE_CACHE_OPS
+/* Push and invalidate the whole data cache (exec CacheClearE with length ~0:
+ * all addresses).  Covers every range a skipped per-range call would have:
+ * clean for what the controller reads, invalidate for what it writes. */
+static inline void xhci_cache_flush_all(struct ExecBase *SysBase)
+{
+	CacheClearE(NULL, ~0UL, CACRF_ClearD);
+}
+#endif
 
 /* DMA cache maintenance comes straight from emu68-common's cache_ops.h
  * (cache_pre_dma / cache_post_dma / DMAF_NoSync), included above. */

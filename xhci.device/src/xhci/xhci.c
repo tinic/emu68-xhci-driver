@@ -619,12 +619,48 @@ static inline struct slab_cache *slab_for_spec(struct xhci_ctrl *ctrl, const str
 	return (struct slab_cache *)((u8 *)ctrl + spec->ctrl_offset);
 }
 
+#if XHCI_COALESCE_CACHE_OPS
+#define XHCI_LVO_CACHEPREDMA (-762)
+#define XHCI_LVO_CACHEPOSTDMA (-768)
+
+/* The target of an exec LVO slot (JMP abs.l), or 0 if the slot holds
+ * something else. */
+static ULONG exec_lvo_target(struct ExecBase *SysBase, LONG lvo)
+{
+	const UBYTE *slot = (const UBYTE *)SysBase + lvo;
+	if (*(const UWORD *)slot != 0x4EF9)
+		return 0;
+	return *(const ULONG *)(slot + 2);
+}
+
+static BOOL in_kickstart_rom(ULONG addr)
+{
+	return (addr >= 0x00F80000UL && addr < 0x01000000UL) ||
+		   (addr >= 0x00E00000UL && addr < 0x00E80000UL);
+}
+
+/* Coalescing pays off where each exec cache call costs a whole-cache flush:
+ * the Kickstart's own CachePreDMA/CachePostDMA.  A patched pair (68040.library
+ * with range ops) keeps the per-range calls.  This decides speed only; the
+ * coalesced path is correct whatever the vectors do. */
+static BOOL xhci_cache_ops_are_kickstart(struct ExecBase *SysBase)
+{
+	return in_kickstart_rom(exec_lvo_target(SysBase, XHCI_LVO_CACHEPREDMA)) &&
+		   in_kickstart_rom(exec_lvo_target(SysBase, XHCI_LVO_CACHEPOSTDMA));
+}
+#endif
+
 s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
 	struct ExecBase *SysBase = ctrl->sysBase;
 	KprintfT("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
 	InitSemaphore(&ctrl->xfer_lock);
+
+#if XHCI_COALESCE_CACHE_OPS
+	ctrl->cache_whole = xhci_cache_ops_are_kickstart(SysBase);
+	Kprintf("cache ops: %s\n", ctrl->cache_whole ? "Kickstart vectors, coalesced" : "patched vectors, per range");
+#endif
 
 	/* ctrl arrives MEMF_CLEAR, so the slot arrays start zeroed. */
 	ctrl->perf = (struct perf){"xhci", xhci_perf_names, ctrl->perfSlots, XP_SLOT_COUNT};

@@ -47,7 +47,25 @@ struct xhci_ring
 	volatile u32 cycle_state;
 
 	struct xhci_generic_trb *deferred_giveback;
+
+#if XHCI_COALESCE_CACHE_OPS
+	/* A transfer ring of a coalescing controller: TD construction leaves its
+	 * TRBs (and link TRBs) to the giveback's whole-cache flush
+	 * (xhci_ring_set_defer_cache()). */
+	BOOL defer_cache;
+#endif
 };
+
+/* TRUE when TRB writes on this ring wait for the giveback's flush. */
+static inline BOOL ring_defers_cache(const struct xhci_ring *ring)
+{
+#if XHCI_COALESCE_CACHE_OPS
+	return ring->defer_cache;
+#else
+	(void)ring;
+	return FALSE;
+#endif
+}
 
 /**
  * Is this TRB a link TRB or was the last TRB the last TRB in this event ring
@@ -147,7 +165,8 @@ static inline void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 			/* device only READS ring TRBs: clean-only keeps the line valid
 			 * for the CPU's next rewrite (barrier kept — the command path
 			 * rings its doorbell right after enqueue, with no later flush) */
-			cache_pre_dma(next, sizeof(union xhci_trb), DMA_ReadFromRAM);
+			if (!ring_defers_cache(ring))
+				cache_pre_dma(next, sizeof(union xhci_trb), DMA_ReadFromRAM);
 		}
 		/* Toggle the cycle bit after the last ring segment. */
 		if (last_trb_on_last_seg(ring,
@@ -184,7 +203,8 @@ static inline dma_addr_t xhci_ring_enqueue_trb_flags(struct xhci_ring *ring,
 	trb->field[2] = le32(field2);
 	trb->field[3] = le32(field3);
 
-	cache_pre_dma(trb, sizeof(struct xhci_generic_trb), cache_flags);
+	if (!ring_defers_cache(ring))
+		cache_pre_dma(trb, sizeof(struct xhci_generic_trb), cache_flags);
 
 	inc_enq(ring, more_trbs_coming);
 
@@ -237,7 +257,8 @@ static inline void prepare_ring(struct xhci_ring *ep_ring)
 		next->link.control ^= le32(TRB_CYCLE);
 
 		/* device-read link TRB: clean-only, barrier kept (see inc_enq) */
-		cache_pre_dma(next, sizeof(union xhci_trb), DMA_ReadFromRAM);
+		if (!ring_defers_cache(ep_ring))
+			cache_pre_dma(next, sizeof(union xhci_trb), DMA_ReadFromRAM);
 
 		/* Toggle the cycle bit after the last ring segment. */
 		if (last_trb_on_last_seg(ep_ring, ep_ring->enq_seg, next))

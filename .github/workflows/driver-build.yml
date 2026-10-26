@@ -1,0 +1,66 @@
+name: driver-build
+
+# Builds xhci.device in the stack's toolchain container for three cache-op
+# selections and checks that XHCI_COALESCE_CACHE_OPS changes only the build
+# it is meant to: with the macro at 0, and in the rangeops build, the binary
+# must be byte-identical to the base branch's.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ghcr.io/rondoval/amiga-build-container:gcc-v16.2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: lvo-coalesce, lvo: "ON", extra: "", same_as_base: "no" }
+          - { name: lvo-macro0, lvo: "ON", extra: "-DXHCI_COALESCE_CACHE_OPS=0", same_as_base: "yes" }
+          - { name: rangeops, lvo: "OFF", extra: "", same_as_base: "yes" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: xhci
+          fetch-depth: 0
+      - name: Stack and base tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git clone -q --depth 1 https://github.com/rondoval/emu68-driver-stack.git stack
+          git -C stack submodule update -q --init --depth 1
+          # high-speed-isoch needs Emu68Common 2.1 (DT_OpenSymbol): the dev branch
+          git -C stack/components/emu68-common fetch -q --depth 1 origin dev
+          git -C stack/components/emu68-common checkout -q FETCH_HEAD
+          git -C xhci worktree add -q ../base origin/high-speed-isoch
+      - name: Build head and base
+        shell: bash
+        run: |
+          set -euo pipefail
+          build() { # src tag lvo extra
+            local i="$PWD/i-$2"
+            cmake -S stack -B "b-$2" -DEMU68_DEBUG_BACKEND=off -DEMU68_FORCE_LVO_CACHE_OPS="$3" \
+              -DEMU68_XHCI_CONTEXT_SOURCE_DIR="$PWD/$1" -DCMAKE_INSTALL_PREFIX="$i" \
+              "-DTOOLCHAIN_CFLAGS=-I$i/Developer/include $4" > "cfg-$2.log"
+            cmake --build "b-$2" --target devicetree.resource > /dev/null
+            cmake --build "b-$2" --target emu68-xhci-driver-context 2>&1 | tee "build-$2.log" | grep -E "warning:|error:" || true
+            cp "$i/DEVS/USBHardware/xhci.device" "xhci-$2.device"
+            sha256sum "xhci-$2.device"
+          }
+          build xhci head "${{ matrix.lvo }}" "${{ matrix.extra }}"
+          build base base "${{ matrix.lvo }}" ""
+      - name: Compare with base
+        shell: bash
+        run: |
+          set -euo pipefail
+          clear_e=$(od -An -tx1 -v xhci-head.device | tr -d ' \n' | { grep -o 4eaefd7e || true; } | wc -l)
+          echo "head CacheClearE call sites: $clear_e"
+          if [ "${{ matrix.same_as_base }}" = yes ]; then
+            cmp xhci-head.device xhci-base.device
+          else
+            ! cmp -s xhci-head.device xhci-base.device
+            [ "$clear_e" -gt 0 ]
+          fi

@@ -89,6 +89,48 @@ with tempfile.TemporaryDirectory(prefix='xhci-lifecycle-') as outer:
     assert not list(model_tmp.iterdir()), 'timed-out producer temporary directory leaked'
     print('PASS infinite-producer timeout and cleanup')
 
+    # Cover each remaining model runner with a hang in extracted driver code.
+    # The ring/config mutations keep traversing their valid circular ring;
+    # the DMA mutation deliberately never returns from span synchronization.
+    hang_cases = [
+        ('test_ring_recovery.py',
+         ['src/xhci/xhci-ring.c', 'src/xhci/xhci-ring-priv.h'],
+         'src/xhci/xhci-ring.c',
+         'while (last_trb(ring, ring->deq_seg, ring->dequeue));', 'while (TRUE);'),
+        ('test_dma_span.py',
+         ['src/xhci/xhci-dma.c', 'include/xhci/xhci-dma.h',
+          'src/xhci/xhci-submit.c', 'src/xhci/xhci-ring.c', 'src/xhci/xhci-ring-priv.h'],
+         'src/xhci/xhci-dma.c',
+         'const ULONG dir = span->to_device ? DMA_ReadFromRAM : DMA_WriteToRAM;',
+         'volatile unsigned hang = 1; while (hang) {}\n'
+         '\tconst ULONG dir = span->to_device ? DMA_ReadFromRAM : DMA_WriteToRAM;'),
+        ('test_config_recovery.py',
+         ['include/xhci/xhci.h', 'src/xhci/xhci-ring.c', 'src/xhci/xhci-ring-priv.h'],
+         'src/xhci/xhci-ring.c',
+         'while (last_trb(ring, ring->deq_seg, ring->dequeue));', 'while (TRUE);'),
+    ]
+    for model, inputs, changed, before, after in hang_cases:
+        mutated = outer / ('hang-' + model)
+        paths = ['tests/host/' + model] + ['xhci.device/' + p for p in inputs]
+        if model == 'test_config_recovery.py':
+            paths.append('tests/host/test_ring_recovery.py')  # Parsed mock prefix only.
+        for path in paths:
+            destination = mutated / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / path, destination)
+        changed_path = mutated / 'xhci.device' / changed
+        source = changed_path.read_text()
+        assert source.count(before) == 1, (model, 'mutation target missing/ambiguous')
+        changed_path.write_text(source.replace(before, after, 1))
+        # All three model binaries use subprocess.run(..., timeout=10).
+        # The 25 s outer deadline is longer; if it fires, run_model raises
+        # instead of returning a result, so this case fails rather than passes.
+        result = run_model([sys.executable, '-I', str(mutated / 'tests/host' / model)],
+                           env=env, timeout=25)
+        assert result.returncode != 0 and 'TimeoutExpired' in result.stderr, (model, result)
+        assert not list(model_tmp.iterdir()), (model, 'timed-out model temp directory leaked')
+        print('PASS extracted-driver hang timeout and cleanup', model)
+
     # A second communicate() timeout used to be mistaken for success here.
     # Keep a PID witness, check the original deadline, and verify that the
     # grandchild stopped. A zombie is stopped, even before init reaps it.

@@ -571,8 +571,9 @@ void ProcessCommand(struct USBIORequest *io)
             break;
 
         case CMD_INTERNAL_ABORT_REQUEST:
-            complete = Do_CMD_INTERNAL_ABORT(io);
-            break;
+            /* The internal handler frees io; do not inspect or reply it below. */
+            Do_CMD_INTERNAL_ABORT(io);
+            return;
 
         case NSCMD_DEVICEQUERY:
             complete = Do_NSCMD_DEVICEQUERY((struct IOStdReq *)io);

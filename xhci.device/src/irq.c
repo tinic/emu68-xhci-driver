@@ -25,6 +25,8 @@
 
 #define XHCI_IRQ_ACK_MASK (STS_EINT | STS_FATAL | STS_PORT)
 
+/* IMAN.IP is RW1C (xHCI 5.5.2.1): disable writes it back to ack the interrupt
+ * being served; enable writes 0 so an IP latched while gated re-asserts. */
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
@@ -34,7 +36,7 @@ static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
-	mmio_write32(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	mmio_write32(ER_IRQ_ENABLE(iman), &ctrl->ir_set->irq_pending);
 }
 
 /*

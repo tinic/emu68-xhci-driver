@@ -425,8 +425,7 @@ struct xhci_intr_reg
 
 /* irq_pending bitmasks */
 #define ER_IRQ_PENDING(p) ((p) & 0x1)
-/* bits 2:31 need to be preserved */
-/* THIS IS BUGGY - FIXME - IP IS WRITE 1 TO CLEAR */
+/* bits 2:31 need to be preserved; IP (bit 0) is RW1C, so these write IP=0 */
 #define ER_IRQ_CLEAR(p) ((p) & 0xfffffffe)
 #define ER_IRQ_ENABLE(p) ((ER_IRQ_CLEAR(p)) | 0x2)
 #define ER_IRQ_DISABLE(p) ((ER_IRQ_CLEAR(p)) & ~(0x2U))

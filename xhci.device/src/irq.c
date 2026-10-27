@@ -29,8 +29,9 @@
 #define XHCI_IRQ_ACK_MASK (STS_EINT | STS_FATAL | STS_PORT)
 
 /* IMAN writes use the RsvdP bits captured at xhci_irq_start (iman_base has
- * IP/IE cleared).  IP is W1C: writing 1 always is a no-op when not pending,
- * a clear when it is — so both writes need no prior PCIe read. */
+ * IP/IE cleared), so neither needs a prior PCIe read.  IP is RW1C (xHCI
+ * 5.5.2.1): disable writes 1 to ack the interrupt being served; enable writes
+ * 0 so an IP latched while gated stays pending and asserts on IE=1. */
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
 	mmio_write32(ctrl->iman_base | IMAN_IP, &ctrl->ir_set->irq_pending); /* IE=0, clear IP */
@@ -38,7 +39,7 @@ static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
-	mmio_write32(ctrl->iman_base | IMAN_IP | IMAN_IE, &ctrl->ir_set->irq_pending); /* IE=1, clear IP */
+	mmio_write32(ctrl->iman_base | IMAN_IE, &ctrl->ir_set->irq_pending); /* IE=1, keep IP */
 }
 
 /*

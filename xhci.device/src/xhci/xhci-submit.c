@@ -52,6 +52,10 @@ inline static void prime_first_trb(struct xhci_ring *ring, struct xhci_generic_t
 {
 	struct ExecBase *SysBase = ring->sysBase;
 	start_trb->field[3] ^= le32(TRB_CYCLE);
+	/* coalescing: a TD primed inside a run sits behind the run's first TD,
+	 * whose cycle bit is still inverted; the run's giveback flushes it */
+	if (ring_defers_cache(ring))
+		return;
 	/* the TD's closing barrier: every TRB of the TD was flushed with
 	 * DMAF_NoSync (xhci_ring_enqueue_trb_ns); this non-NoSync clean
 	 * completes them all before the doorbell */
@@ -69,6 +73,24 @@ void xhci_submit_ring_doorbell(struct usb_device *udev, struct xhci_ring *ring)
 inline static void giveback_first_trb(struct usb_device *udev, struct xhci_ring *ring,
 									  struct xhci_generic_trb *start_trb)
 {
+#if XHCI_COALESCE_CACHE_OPS
+	if (ring_defers_cache(ring))
+	{
+		/* Two flushes, in this order.  The first puts every TRB and payload
+		 * of the run in RAM while the first TD's cycle bit is still
+		 * inverted, so the controller cannot start the run on a part of it.
+		 * Only then is the bit flipped, and the second (one TRB, a whole
+		 * flush on the Kickstart's vector) hands the run over before the
+		 * doorbell.  One flush could not order the bit after the rest: a
+		 * whole-cache push writes lines back in no defined order. */
+		struct ExecBase *SysBase = ring->sysBase;
+		xhci_cache_sync_all(udev->controller);
+		start_trb->field[3] ^= le32(TRB_CYCLE);
+		cache_pre_dma(start_trb, sizeof(struct xhci_generic_trb), DMA_ReadFromRAM);
+		xhci_submit_ring_doorbell(udev, ring);
+		return;
+	}
+#endif
 	prime_first_trb(ring, start_trb);
 	xhci_submit_ring_doorbell(udev, ring);
 }

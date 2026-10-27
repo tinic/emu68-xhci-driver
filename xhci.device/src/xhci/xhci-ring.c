@@ -449,6 +449,45 @@ union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring)
 	return event;
 }
 
+#if XHCI_COALESCE_CACHE_OPS
+/* xhci_ring_get_event_trb() without the invalidate, for a drain that flushed
+ * the whole cache after the controller signalled.  A line the CPU filled
+ * after that flush holds what RAM held at the fill: the controller's event,
+ * or an older TRB of this slot.  An older TRB carries the previous lap's
+ * cycle bit (or the zero of a new segment) and reads as controller-owned, so
+ * a stale line can only hide an event, never show a false one; the drain's
+ * closing flush and re-check (xhci_process_event_trb()) find the hidden one. */
+union xhci_trb *xhci_ring_get_event_trb_cached(struct xhci_ring *ring)
+{
+	union xhci_trb *event = ring->dequeue;
+
+	if ((le32(event->event_cmd.flags) & TRB_CYCLE) != ring->cycle_state)
+		return NULL;
+
+	return event;
+}
+
+/* The coalesced flush.  Retired events are acknowledged first (ERDP write,
+ * EHB clear), so every ERDP write is followed by a whole-cache invalidate and
+ * the drain's next read of the event ring is a re-check after that write.
+ * Then the whole data cache is pushed and invalidated: CPU-written TRBs and
+ * payloads reach RAM, and no event-ring line older than this call is left. */
+void xhci_cache_sync_all(struct xhci_ctrl *ctrl)
+{
+	if (ctrl->evt_unacked)
+	{
+		xhci_ring_ack_events(ctrl);
+		ctrl->evt_unacked = FALSE;
+	}
+	xhci_cache_flush_all(ctrl->sysBase);
+}
+
+void xhci_ring_set_defer_cache(struct xhci_ring *ring, const struct xhci_ctrl *ctrl)
+{
+	ring->defer_cache = xhci_cache_whole(ctrl);
+}
+#endif
+
 /**
  * Retires a handled event TRB by advancing the software dequeue pointer.
  * Must run exactly once at the end of each event handler; the TRB must not
@@ -502,6 +541,12 @@ u32 xhci_ring_get_deq_ptr_for_trb(struct xhci_ring *ring, dma_addr_t trb_addr)
 		return 0;
 
 	union xhci_trb *trb = (union xhci_trb *)(uintptr_t)trb_addr;
+#if XHCI_COALESCE_CACHE_OPS
+	/* The TRB may still be dirty in the cache, waiting for a giveback flush:
+	 * push it before the invalidate below can drop it. */
+	if (ring_defers_cache(ring))
+		xhci_cache_flush_all(SysBase);
+#endif
 	cache_post_dma(trb, sizeof(*trb), 0);
 	return trb_addr | (le32(trb->generic.field[3]) & TRB_CYCLE);
 }
@@ -511,6 +556,13 @@ void xhci_ring_patch_trbs_to_noop(struct xhci_ring *ring, dma_addr_t *trb_addrs,
 	struct ExecBase *SysBase = ring->sysBase;
 	if (!trb_addrs || start_index >= trb_count)
 		return;
+
+#if XHCI_COALESCE_CACHE_OPS
+	/* as in xhci_ring_get_deq_ptr_for_trb(): push TRBs still waiting for a
+	 * giveback flush before the per-TRB invalidates */
+	if (ring_defers_cache(ring))
+		xhci_cache_flush_all(SysBase);
+#endif
 
 	for (u32 index = start_index; index < trb_count; ++index)
 	{

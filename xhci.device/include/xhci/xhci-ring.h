@@ -310,6 +310,10 @@ BOOL xhci_ring_td_fits(struct xhci_ring *ring, u32 num_trbs, dma_addr_t oldest);
 void xhci_ring_consume_event(struct xhci_ctrl *ctrl);
 void xhci_ring_ack_events(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring);
+/* XHCI_COALESCE_CACHE_OPS builds only (xhci.h) */
+union xhci_trb *xhci_ring_get_event_trb_cached(struct xhci_ring *ring);
+void xhci_cache_sync_all(struct xhci_ctrl *ctrl);
+void xhci_ring_set_defer_cache(struct xhci_ring *ring, const struct xhci_ctrl *ctrl);
 
 u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring);
 u32 xhci_ring_get_deq_ptr_for_trb(struct xhci_ring *ring, dma_addr_t trb_addr);

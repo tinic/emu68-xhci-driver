@@ -115,6 +115,10 @@ static struct ep_context *ep_context_alloc(struct usb_device *udev, u8 ep_index,
     _NewMinList(&ep_ctx->pending_reqs);
     _NewMinList(&ep_ctx->abort_reqs);
     ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_INITIAL_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
+#if XHCI_COALESCE_CACHE_OPS
+    if (ep_ctx->ring)
+        xhci_ring_set_defer_cache(ep_ctx->ring, udev->controller);
+#endif
     if (!ep_ctx->ring || !xhci_td_create_list(udev->controller, ep_ctx, ep_ctx->ring))
     {
         Kprintf("Failed to create resources for EP %ld\n", ep_index);
@@ -1220,6 +1224,9 @@ s8 xhci_ep_streams_build(struct ep_context *ep_ctx, u16 num_streams, u8 max_pstr
                                                  ep_ctx->ep_index, ep_ctx->max_packet_size);
         if (!ring)
             goto fail;
+#if XHCI_COALESCE_CACHE_OPS
+        xhci_ring_set_defer_cache(ring, ctrl);
+#endif
         xhci_ring_set_stream_id(ring, id);
         st->rings[id] = ring;
         if (!xhci_td_create_list(ctrl, ep_ctx, ring))

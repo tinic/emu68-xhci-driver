@@ -14,6 +14,7 @@ PREAMBLE = r"""
 #include <stdio.h>
 typedef unsigned u32;
 typedef int BOOL;
+#define TRUE 1
 struct Library { int unused; };
 struct xhci_intr_reg { u32 irq_pending; };
 struct xhci_ctrl { struct xhci_intr_reg *ir_set; void *pci_dev; };
@@ -23,13 +24,23 @@ struct XHCIUnit {
     struct XHCIDevice *device;
     BOOL msi_enabled;
 };
-/* IMAN (xHCI 5.5.2.1): IP bit 0 RW1C, IE bit 1 RW, rest preserved */
-static u32 ip, ie, writes, ip_writes, vector_masked;
-static u32 mmio_read32(u32 *reg) { (void)reg; return ip | ie << 1; }
+/* IMAN (xHCI 5.5.2.1): IP bit 0 RW1C, IE bit 1 RW, bits 31:2 RsvdP */
+#define RSVD 0xa5a5a5a4u
+static u32 ip, ie, rsvd, writes, ip_writes, rsvd_lost, vector_masked;
+static u32 event_after_read, cmd_updates;
+static u32 mmio_read32(u32 *reg)
+{
+    (void)reg;
+    u32 value = rsvd | ie << 1 | ip;
+    /* event posted between the read and the write-back */
+    if (event_after_read) { event_after_read = 0; ip = 1; }
+    return value;
+}
 static void mmio_write32(u32 value, u32 *reg)
 {
     (void)reg;
     writes++;
+    if ((value & ~3u) != rsvd) rsvd_lost++;
     if (value & 1) { ip_writes++; ip = 0; }
     ie = (value >> 1) & 1;
 }
@@ -38,6 +49,8 @@ static void vector_mask(struct Library *base, void *dev, int vec, u32 masked)
 { assert(base); (void)dev; (void)vec; vector_masked = masked; }
 #define MaskIntVector(dev, vec) vector_mask(pcielibBase, dev, vec, 1)
 #define UnmaskIntVector(dev, vec) vector_mask(pcielibBase, dev, vec, 0)
+static void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
+{ (void)ctrl; assert(enable); cmd_updates++; }
 static u32 line(void) { return ip && ie; }
 """
 
@@ -47,35 +60,52 @@ static struct xhci_ctrl ctrl = { &ir, 0 };
 static struct Library pcie;
 static struct XHCIDevice dev = { &pcie };
 static struct XHCIUnit unit = { &ctrl, &dev, 0 };
-static void reset(u32 pending, u32 enabled)
-{ ip = pending; ie = enabled; writes = ip_writes = vector_masked = 0; }
+static void reset(BOOL msi, u32 pending, u32 enabled)
+{
+    unit.msi_enabled = msi;
+    ip = pending; ie = enabled; rsvd = RSVD;
+    writes = ip_writes = rsvd_lost = vector_masked = event_after_read = 0;
+}
 int main(void)
 {
-    /* ISR gate: acks the interrupt it serves and shuts IE */
-    reset(1, 1);
+    /* INTx/non-PCI ISR gate: deliberate ack (IP=1 written), IE shut */
+    reset(0, 1, 1);
     xhci_irq_mask(&unit);
-    assert(ip == 0 && ie == 0 && ip_writes == 1);
+    assert(ip == 0 && ie == 0 && ip_writes == 1 && !rsvd_lost);
 
-    /* event lands while gated: re-arm must keep IP so the line re-asserts */
+    /* window 1: event after the empty-ring probe, before the IMAN read */
     ip = 1; ip_writes = 0;
     xhci_int_rearm(&unit);
-    assert(ie == 1);
-    assert(ip_writes == 0 && "enable wrote IP=1 and cleared a pending interrupt");
+    assert(ie == 1 && !rsvd_lost);
+    assert(ip_writes == 0 && "re-arm wrote IP=1 and cleared a pending interrupt");
     assert(ip == 1 && line());
 
-    /* nothing pending: re-arm leaves the line quiet */
-    reset(0, 0);
+    /* window 2: event after the IMAN read, at the write */
+    reset(0, 0, 0);
+    event_after_read = 1;
     xhci_int_rearm(&unit);
-    assert(ie == 1 && ip == 0 && !line() && ip_writes == 0);
+    assert(ie == 1 && ip == 1 && line() && ip_writes == 0 && !rsvd_lost);
 
-    /* MSI path leaves IMAN alone */
-    unit.msi_enabled = 1;
-    reset(1, 1);
+    /* nothing pending: re-arm leaves the line quiet */
+    reset(0, 0, 0);
+    xhci_int_rearm(&unit);
+    assert(ie == 1 && ip == 0 && !line() && ip_writes == 0 && !rsvd_lost);
+
+    /* startup enable shares the helper: a latched IP survives it */
+    reset(0, 1, 0);
+    xhci_irq_start(&ctrl);
+    assert(cmd_updates == 1 && ie == 1 && ip == 1 && ip_writes == 0 && !rsvd_lost);
+    reset(1, 1, 0);
+    xhci_irq_start(&ctrl);
+    assert(ie == 1 && ip == 1 && ip_writes == 0 && !rsvd_lost);
+
+    /* MSI/MSI-X runtime gate is the root-complex mask; IMAN untouched */
+    reset(1, 1, 1);
     xhci_irq_mask(&unit);
     assert(vector_masked && writes == 0);
     xhci_int_rearm(&unit);
-    assert(!vector_masked && writes == 0 && ip == 1);
-    puts("iman rearm: 4 cases passed");
+    assert(!vector_masked && writes == 0 && ip == 1 && ie == 1);
+    puts("iman rearm: 7 cases passed");
 }
 """
 
@@ -108,6 +138,7 @@ def main():
                       "static inline void xhci_irq_enable_runtime",
                       "static inline void xhci_irq_mask",
                       "static inline void xhci_irq_unmask",
+                      "static inline void xhci_irq_start",
                       "void xhci_int_rearm"):
         code += function(source, signature) + "\n"
     code += CASES

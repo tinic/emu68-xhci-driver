@@ -28,9 +28,11 @@ Changes since v6.3.
 - **An interrupt that arrives while the driver catches up is no longer lost.**
   Re-enabling the interrupter wrote the pending bit back as 1, and the
   controller treats that write as an acknowledge. An event posted between the
-  last event-ring check and the re-enable was then never signalled, and the
-  controller raised no further interrupt. Affects the onboard controller
-  (unit 0) and PCIe units using INTx; MSI and MSI-X units were not affected.
+  last event-ring check and the re-enable could then go unsignalled, with no
+  further interrupt raised while the event handler busy bit stayed set. The
+  runtime re-arm of the onboard controller (unit 0) and of PCIe units using
+  INTx is affected; MSI and MSI-X units re-arm through the vector mask, and
+  share only the start-up enable.
 
 ---
 

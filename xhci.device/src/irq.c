@@ -33,7 +33,7 @@ static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
-	mmio_write32(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	mmio_write32(ER_IRQ_ENABLE(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
